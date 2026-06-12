@@ -8,8 +8,8 @@ import os, json, math, sys
 # ── Suppress Streamlit context warnings ──────────────────────────────────────
 os.environ.setdefault("STREAMLIT_BROWSER_GATHER_USAGE_STATS", "false")
 
-# Clear all API keys to simulate no-key environment
-for k in ['API_FOOTBALL_KEY', 'FOOTBALL_DATA_KEY', 'ANTHROPIC_API_KEY']:
+# Clear all football API keys to simulate no-key environment
+for k in ['API_FOOTBALL_KEY', 'FOOTBALL_DATA_KEY']:
     os.environ.pop(k, None)
 
 # ── Import only the pure-Python pieces from app ───────────────────────────────
@@ -133,8 +133,8 @@ except ValueError:
     check("Reject unknown team raises ValueError", True)
 
 # ── Test 8: Missing key detection ─────────────────────────────────────────────
-missing = [k for k in ['API_FOOTBALL_KEY', 'FOOTBALL_DATA_KEY', 'ANTHROPIC_API_KEY'] if not os.getenv(k)]
-check("Detect all 3 missing keys", len(missing) == 3, f"Got {missing}")
+missing = [k for k in ['API_FOOTBALL_KEY', 'FOOTBALL_DATA_KEY'] if not os.getenv(k)]
+check("Detect both missing football keys", len(missing) == 2, f"Got {missing}")
 
 # ── Test 9: Edge computation ──────────────────────────────────────────────────
 prob_mock = {'pct_a': 50, 'pct_draw': 25, 'pct_b': 25}

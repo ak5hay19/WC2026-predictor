@@ -16,7 +16,6 @@ from typing import Any, Literal, Optional
 import plotly.graph_objects as go
 import requests
 import streamlit as st
-from anthropic import Anthropic, APIError, APITimeoutError
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -36,7 +35,8 @@ def _running_in_streamlit() -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 APP_TITLE = "🏆 WC 2026 Predictive Analytics Engine"
-MODEL_ID = "claude-sonnet-4-6"
+MODEL_ID = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 LOG_FILE = "analysis_log.jsonl"
 
 # All 48 FIFA World Cup 2026 teams — verified from official draw
@@ -508,7 +508,7 @@ class DataClient:
         except Exception as e2:
             warning += f"\n⚠️ football-data.org: {e2}."
 
-        return [], "none", now, warning + "\n⚠️ Structured API unavailable — facts below are web-search derived, verify manually."
+        return [], "none", now, warning + "\n⚠️ Structured API unavailable — no recent-result facts are available."
 
     def _fd_team_id(self, tla: str) -> int:
         """Lookup football-data.org numeric ID by TLA (simplified mapping)."""
@@ -650,7 +650,7 @@ def _build_system_prompt(
     else:
         h2h_summary = "H2H data unavailable"
 
-    return f"""You are a football performance analyst producing structured pre-match research for
+    return f"""You are a football performance analyst producing structured pre-match analysis for
 FIFA World Cup 2026. Today's date is {today}. The tournament is in progress.
 
 VERIFIED FACTS (from official data APIs — treat as ground truth, do not contradict):
@@ -659,19 +659,23 @@ VERIFIED FACTS (from official data APIs — treat as ground truth, do not contra
 - {team_b} last 5 results: {fmt_results(results_b)}
 - Head-to-head (last 10): {h2h_summary}
 
-YOUR TASK: Use web search to research ONLY the qualitative layer:
-1. Current form narrative beyond raw results (performance quality, xG trends if reported)
-2. Tactical identity of each side under their current manager (formation, pressing,
-   build-up style) and how the styles interact
-3. Squad availability: confirmed injuries, suspensions, fitness doubts — with the date
-   of each report. If you cannot find a dated report from the last 14 days, say
-   "no recent confirmed reports" instead of guessing.
-4. Key player form (club + tournament performances)
+You have no web access. Base current claims only on the verified facts above. You may use
+general football knowledge for broad tactical context, but do not invent current managers,
+injuries, suspensions, player form, xG, or dated reports. When current evidence is absent,
+say so explicitly, score conservatively toward 5, set confidence to "low", and use an empty
+sources list.
+
+YOUR TASK:
+1. Describe current form from the supplied results only
+2. Explain broad tactical tendencies and how the styles may interact, clearly marking
+   uncertain or potentially outdated details
+3. Treat squad availability as unknown unless supplied in VERIFIED FACTS
+4. Assess player performance only when supported by the supplied results
 5. Contextual factors: venue conditions/altitude/climate, rest days, travel, stakes
 
-SCORING: Rate each category for each team on 0–10. A score must be justified by at
-least one specific, dated, sourced fact. If evidence is thin, score conservatively
-toward 5 and set "confidence": "low" for that category.
+SCORING: Rate each category for each team on 0–10. Justify scores with the supplied
+facts. If evidence is thin, score conservatively toward 5 and set confidence to "low".
+Do not fabricate source URLs; use [] when no URL was provided.
 
 OUTPUT: Respond with ONLY a raw JSON object matching the schema below. No markdown
 fences, no preamble, no trailing text. Do NOT output win/draw/loss percentages —
@@ -718,10 +722,6 @@ def run_llm_analysis(
     """
     Returns (LLMAnalysis|None, raw_text_fallback|None, error_message).
     """
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return None, None, "ANTHROPIC_API_KEY not set"
-
     # Deserialize inputs
     fixture = Fixture.model_validate_json(fixture_json) if fixture_json != "null" else None
     results_a = [ResultRow.model_validate(r) for r in json.loads(results_a_json)]
@@ -730,24 +730,24 @@ def run_llm_analysis(
 
     system_prompt = _build_system_prompt(team_a_name, team_b_name, fixture, results_a, results_b, h2h)
 
-    client = Anthropic(api_key=api_key)
-    tools = [{"type": "web_search_20250305", "name": "web_search"}]
-
     def _call(messages: list) -> str:
-        response = client.messages.create(
-            model=MODEL_ID,
-            max_tokens=4096,
-            system=system_prompt,
-            tools=tools,
-            messages=messages,
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={
+                "model": MODEL_ID,
+                "stream": False,
+                "format": "json",
+                "messages": [{"role": "system", "content": system_prompt}, *messages],
+                "options": {"temperature": 0.2},
+            },
             timeout=90,
         )
-        # Gather all text blocks from the response
-        texts = []
-        for block in response.content:
-            if hasattr(block, "text"):
-                texts.append(block.text)
-        return "\n".join(texts)
+        response.raise_for_status()
+        data = response.json()
+        content = data.get("message", {}).get("content")
+        if not content:
+            raise ValueError("Ollama returned no message content")
+        return content
 
     try:
         raw = _call([{"role": "user", "content": f"Analyze the {team_a_name} vs {team_b_name} matchup."}])
@@ -769,10 +769,16 @@ def run_llm_analysis(
         # Raw text fallback
         return None, raw2 or raw, f"JSON parse failed after retry: {err2}"
 
-    except APITimeoutError:
+    except requests.Timeout:
         return None, None, "LLM API timeout (90s exceeded)"
-    except APIError as e:
-        return None, None, f"Anthropic API error: {e}"
+    except requests.ConnectionError:
+        return None, None, (
+            f"Cannot connect to Ollama at {OLLAMA_BASE_URL}. "
+            "Start Ollama and pull the configured model."
+        )
+    except requests.HTTPError as e:
+        detail = e.response.text if e.response is not None else str(e)
+        return None, None, f"Ollama API error: {detail}"
     except Exception as e:
         return None, None, f"Unexpected error: {traceback.format_exc()}"
 
@@ -930,12 +936,11 @@ def render_setup_screen(missing_keys: list[str]):
     key_info = {
         "API_FOOTBALL_KEY": ("API-Football (primary data)", "https://www.api-football.com/"),
         "FOOTBALL_DATA_KEY": ("football-data.org (fallback data)", "https://www.football-data.org/client/register"),
-        "ANTHROPIC_API_KEY": ("Anthropic Claude (LLM analysis)", "https://console.anthropic.com/"),
     }
     for key in missing_keys:
         name, url = key_info.get(key, (key, "#"))
         st.markdown(f"- **`{key}`** — {name} → [Get free key]({url})")
-    st.info("The app will load but analysis requires at least `ANTHROPIC_API_KEY` and one football data key.")
+    st.info("Add at least one football data key. Ollama runs locally and does not require an API key.")
 
 
 def render_result_table(results: list[ResultRow], highlight_recent: int = 2):
@@ -1036,7 +1041,7 @@ def main():
     """, unsafe_allow_html=True)
 
     # ── Check env vars ────────────────────────────────────────────────────────
-    missing_keys = [k for k in ["API_FOOTBALL_KEY", "FOOTBALL_DATA_KEY", "ANTHROPIC_API_KEY"]
+    missing_keys = [k for k in ["API_FOOTBALL_KEY", "FOOTBALL_DATA_KEY"]
                     if not os.getenv(k)]
 
     # ── Header ────────────────────────────────────────────────────────────────
@@ -1106,7 +1111,11 @@ def main():
         af_ok = st.session_state.get("af_ok", None)
         fd_ok = st.session_state.get("fd_ok", None)
         dot = lambda ok: "🟢" if ok is True else ("🔴" if ok is False else "⚪")
-        st.markdown(f"{dot(af_ok)} API-Football  \n{dot(fd_ok)} football-data.org  \n{'🟢' if os.getenv('ANTHROPIC_API_KEY') else '🔴'} Anthropic Claude")
+        st.markdown(
+            f"{dot(af_ok)} API-Football  \n"
+            f"{dot(fd_ok)} football-data.org  \n"
+            f"⚪ Ollama `{MODEL_ID}`"
+        )
 
     # ── Main Controls ─────────────────────────────────────────────────────────
     st.divider()
@@ -1136,7 +1145,7 @@ def main():
     if same_team:
         st.warning("⚠️ Please select two different teams.")
 
-    analyze_disabled = same_team or bool(missing_keys and "ANTHROPIC_API_KEY" in missing_keys)
+    analyze_disabled = same_team
     analyze_clicked = st.button(
         "🔍 Analyze Matchup",
         type="primary",
@@ -1144,9 +1153,6 @@ def main():
         disabled=analyze_disabled,
         key="analyze_btn",
     )
-
-    if analyze_disabled and not same_team:
-        st.info("Set `ANTHROPIC_API_KEY` to enable analysis.")
 
     # ── Analysis Flow ─────────────────────────────────────────────────────────
     if analyze_clicked and not same_team:
@@ -1222,7 +1228,7 @@ def main():
                 st.write(f"⚠️ H2H error: {e}")
 
             # Step 3: LLM analysis
-            status.update(label="Running web-search analysis with Claude…")
+            status.update(label=f"Running local analysis with Ollama ({MODEL_ID})…")
             try:
                 date_key = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 fixture_json = fixture_obj.model_dump_json() if fixture_obj else "null"

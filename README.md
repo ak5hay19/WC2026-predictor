@@ -5,8 +5,8 @@ Select two national teams and the app will:
 
 1. **Pull verified structured data** (fixture, venue, kickoff, recent results, H2H) from
    football data APIs — with automatic fallback between providers.
-2. **Augment with LLM + web search** via Claude for qualitative analysis (form narrative,
-   tactics, injuries, key players).
+2. **Augment with a local Ollama LLM** for qualitative analysis based on the verified
+   data supplied by the football APIs.
 3. **Compute win/draw/loss probabilities deterministically in Python** from weighted
    category scores — the LLM never emits probabilities.
 
@@ -27,7 +27,7 @@ Select two national teams and the app will:
 ### 1. Clone / navigate to the project directory
 
 ```bash
-cd c:\garrison\Prediction
+cd "c:\garrison\Prediction\WC2026 predictor"
 ```
 
 ### 2. Install dependencies
@@ -49,19 +49,26 @@ Then edit `.env`:
 ```
 API_FOOTBALL_KEY=your_key_here
 FOOTBALL_DATA_KEY=your_key_here
-ANTHROPIC_API_KEY=your_key_here
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.1:8b
 ```
 
-### Where to get each free API key
+Install [Ollama](https://ollama.com/download), then download the default model:
+
+```bash
+ollama pull llama3.1:8b
+```
+
+### Where to get each football API key
 
 | Key | Service | URL | Free Tier |
 |-----|---------|-----|-----------|
 | `API_FOOTBALL_KEY` | API-Football (api-sports.io) — **primary data source** | https://www.api-football.com/ | 100 requests/day |
 | `FOOTBALL_DATA_KEY` | football-data.org — **fallback data source** | https://www.football-data.org/client/register | 10 requests/minute |
-| `ANTHROPIC_API_KEY` | Anthropic Claude — **LLM + web search** | https://console.anthropic.com/ | Pay-per-use (~$3 per 1M tokens) |
 
 > **Note:** The app boots and displays the team selector without any keys set.
-> At least `ANTHROPIC_API_KEY` and one football data key are required to run an analysis.
+> Ollama does not require an API key. At least one football data key is recommended for
+> useful verified match data.
 
 ---
 
@@ -85,7 +92,7 @@ app.py
 │   ├── get_fixture()     — API-Football → football-data.org fallback
 │   ├── get_last_results()— API-Football → football-data.org fallback
 │   └── get_h2h()         — API-Football primary
-├── run_llm_analysis()    — Claude claude-sonnet-4-6 + web_search_20250305 tool
+├── run_llm_analysis()    — Local Ollama chat API with JSON output
 │   └── parse → repair-retry → raw-text-fallback loop
 ├── compute_probabilities()— Deterministic logistic + draw model
 │   └── P always sums to exactly 100%

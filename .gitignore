@@ -1,2 +1,4 @@
 .env.example
 multiwc.md
+/__pycache__
+.env
